@@ -1,0 +1,6 @@
+bin/
+vendor/
+*.log
+config.yaml
+*.out
+.DS_Store

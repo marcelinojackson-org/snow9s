@@ -1,0 +1,11 @@
+# Sample snow9s configuration.
+contexts:
+  default:
+    account: abc123
+    user: myuser
+    # password: mypassword          # or use private_key_path below for key pair auth
+    # private_key_path: /path/to/your/key.p8
+    database: MYDB
+    schema: PUBLIC
+    warehouse: COMPUTE_WH
+    debug: false
