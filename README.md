@@ -57,10 +57,22 @@ A full example is available at `config.example.yaml`.
 - Navigation: `j/k`, `↓/↑`
 - Page: `Ctrl+d` / `Ctrl+u`
 - Top/Bottom: `g` / `G`
-- Filter: `/`, `Esc` clears
+- Views: `s` Services, `p` Pools, `r` Repos
+- Instances: `i` (from Services), `b` back
+- Details: `Enter` (opens details pane), `Esc` closes
+- Filter: `/` (type to filter), `Esc` clears
+- Command: `:` (command mode)
 - Refresh: `Ctrl+r`
 - Quit: `q` or `Ctrl+c`
 - Help: `?`
+
+### Command mode examples
+
+- `:svc` or `:services` — Services view
+- `:pool` or `:pools` — Compute pools view
+- `:repo` or `:repos` — Image repositories view
+- `:inst` — Instances view for the selected service
+- `:ns <schema>` — Switch schema (namespace)
 
 ## Make targets
 
@@ -72,7 +84,7 @@ A full example is available at `config.example.yaml`.
 
 ## Screenshot
 
-(placeholder) ![snow9s screenshot](docs/screenshot.png)
+![snow9s screenshot](docs/screenshot.png)
 
 ## Notes
 

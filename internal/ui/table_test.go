@@ -1,15 +1,15 @@
 package ui
 
-import (
-	"testing"
-
-	"github.com/yourusername/snow9s/pkg/models"
-)
+import "testing"
 
 func TestTableFiltering(t *testing.T) {
-	table := NewServicesTable(DefaultStyles())
-	services := []models.Service{{Name: "alpha", Namespace: "PUBLIC", Status: "running"}, {Name: "beta", Namespace: "PUBLIC", Status: "stopped"}}
-	table.SetServices(services)
+	table := NewDataTable(DefaultStyles())
+	headers := []string{"NAME", "STATUS"}
+	rows := []TableRow{
+		{Cells: []string{"alpha", "running"}},
+		{Cells: []string{"beta", "stopped"}},
+	}
+	table.SetData(headers, rows)
 	if got := table.GetRowCount(); got != 3 { // header + rows
 		t.Fatalf("expected 3 rows got %d", got)
 	}
@@ -20,9 +20,12 @@ func TestTableFiltering(t *testing.T) {
 }
 
 func TestStatusColoring(t *testing.T) {
-	table := NewServicesTable(DefaultStyles())
-	table.SetServices([]models.Service{{Name: "svc", Namespace: "PUBLIC", Status: "running"}})
-	cell := table.GetCell(1, 2) // status column first row
+	table := NewDataTable(DefaultStyles())
+	headers := []string{"NAME", "STATUS"}
+	rows := []TableRow{{Cells: []string{"svc", "running"}}}
+	table.SetData(headers, rows)
+	table.SetStatusColumn(1)
+	cell := table.GetCell(1, 1) // status column first row
 	fg, _, _ := cell.Style.Decompose()
 	if fg != DefaultStyles().StatusRunning {
 		t.Fatalf("status color not applied")

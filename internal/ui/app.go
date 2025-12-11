@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -20,6 +21,30 @@ import (
 
 const appVersion = "0.1.0"
 
+type viewKind string
+
+const (
+	viewServices  viewKind = "Services"
+	viewPools     viewKind = "Pools"
+	viewRepos     viewKind = "Repos"
+	viewInstances viewKind = "Instances"
+)
+
+type inputMode int
+
+const (
+	inputNone inputMode = iota
+	inputFilter
+	inputCommand
+)
+
+type viewData struct {
+	headers      []string
+	rows         []TableRow
+	statusColumn int
+	warning      string
+}
+
 // App wires the widgets, navigation, and data refresh loop.
 type App struct {
 	app           *tview.Application
@@ -27,7 +52,7 @@ type App struct {
 	header        *Header
 	footer        *Footer
 	errorView     *tview.TextView
-	table         *ServicesTable
+	table         *DataTable
 	filterField   *tview.InputField
 	spcs          *snowflake.SPCS
 	cfg           config.Config
@@ -39,6 +64,13 @@ type App struct {
 	debugEnabled  bool
 	helpVisible   bool
 	defaultHints  []string
+	pages         *tview.Pages
+	bottomPages   *tview.Pages
+	detailView    *tview.TextView
+	detailVisible bool
+	view          viewKind
+	activeService string
+	inputMode     inputMode
 }
 
 // NewApp constructs the layout with k9s-inspired styling.
@@ -57,25 +89,14 @@ func NewApp(cfg config.Config, spcs *snowflake.SPCS, debugEnabled bool) *App {
 	errorView.SetWrap(false)
 	errorView.SetText("")
 
-	table := NewServicesTable(styles)
+	table := NewDataTable(styles)
 	table.SetTitle(" Services ").SetTitleAlign(tview.AlignLeft)
 
 	filterField := tview.NewInputField().SetLabel("")
 	filterField.SetFieldBackgroundColor(styles.RowAltBg)
 	filterField.SetFieldTextColor(styles.PrimaryText)
 	filterField.SetLabelColor(styles.PrimaryText)
-	filterField.SetBorder(true)
-	filterField.SetBorderColor(styles.Border)
-	filterField.SetTitle(" / Filter ")
-	filterField.SetDoneFunc(func(key tcell.Key) {
-		if key == tcell.KeyEsc {
-			filterField.SetText("")
-		}
-	})
-	filterField.SetChangedFunc(func(text string) {
-		table.SetFilter(text)
-		footer.SetStatus(fmt.Sprintf("%s  filter: %s", table.SelectionInfo(), text))
-	})
+	filterField.SetBorder(false)
 	filterField.SetDisabled(true)
 
 	var debugView *tview.TextView
@@ -87,7 +108,7 @@ func NewApp(cfg config.Config, spcs *snowflake.SPCS, debugEnabled bool) *App {
 		debugView.SetTitle(" Debug ")
 	}
 
-	return &App{
+	appState := &App{
 		app:          app,
 		styles:       styles,
 		header:       header,
@@ -100,7 +121,22 @@ func NewApp(cfg config.Config, spcs *snowflake.SPCS, debugEnabled bool) *App {
 		debugView:    debugView,
 		debugEnabled: debugEnabled,
 		defaultHints: defaultKeyHints(),
+		view:         viewServices,
 	}
+
+	filterField.SetChangedFunc(func(text string) {
+		if appState.inputMode != inputFilter {
+			appState.footer.SetStatus(fmt.Sprintf("%s  cmd: %s", appState.table.SelectionInfo(), text))
+			return
+		}
+		appState.table.SetFilter(text)
+		appState.footer.SetStatus(fmt.Sprintf("%s  filter: %s", appState.table.SelectionInfo(), text))
+	})
+	filterField.SetDoneFunc(func(key tcell.Key) {
+		appState.completeInput(key)
+	})
+
+	return appState
 }
 
 // Run boots the TUI, wiring key bindings and refresh loop.
@@ -108,6 +144,13 @@ func (a *App) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	a.cancel = cancel
 	defer cancel()
+
+	a.detailView = tview.NewTextView().SetDynamicColors(true)
+	a.detailView.SetBackgroundColor(a.styles.Background)
+	a.detailView.SetTextColor(a.styles.PrimaryText)
+	a.detailView.SetBorder(true)
+	a.detailView.SetBorderColor(a.styles.Border)
+	a.detailView.SetTitle(" Details (Esc to close) ")
 
 	rootFlex := tview.NewFlex().SetDirection(tview.FlexRow)
 	rootFlex.SetBackgroundColor(a.styles.Background)
@@ -121,12 +164,18 @@ func (a *App) Run(ctx context.Context) error {
 	} else {
 		rootFlex.AddItem(a.table, 0, 1, true)
 	}
-	rootFlex.AddItem(a.filterField, 1, 0, false)
-	rootFlex.AddItem(a.footer.View(), 1, 0, false)
+	a.bottomPages = tview.NewPages()
+	a.bottomPages.AddPage("footer", a.footer.View(), true, true)
+	a.bottomPages.AddPage("input", a.filterField, true, false)
+	rootFlex.AddItem(a.bottomPages, 1, 0, false)
 
-	a.app.SetRoot(rootFlex, true)
+	a.pages = tview.NewPages()
+	a.pages.AddPage("main", rootFlex, true, true)
+	a.pages.AddPage("detail", a.detailView, true, false)
+	a.app.SetRoot(a.pages, true)
 	a.app.SetFocus(a.table)
 	a.bindKeys()
+	a.setView(viewServices)
 
 	// handle Ctrl+C
 	go func() {
@@ -152,54 +201,75 @@ func (a *App) startRefreshLoop(ctx context.Context) {
 	a.refreshTicker = time.NewTicker(5 * time.Second)
 	go func() {
 		defer a.refreshTicker.Stop()
-		a.fetchServices(ctx)
+		a.fetchCurrentView(ctx)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-a.refreshTicker.C:
-				a.fetchServices(ctx)
+				a.fetchCurrentView(ctx)
 			}
 		}
 	}()
 }
 
-func (a *App) fetchServices(ctx context.Context) {
-	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	a.setLoading(true)
-	services, err := a.spcs.ListServices(timeoutCtx)
-	a.setLoading(false)
-	if err != nil {
-		a.showError(fmt.Sprintf("Error fetching services: %v (Ctrl+r to retry)", err))
+func (a *App) fetchCurrentView(ctx context.Context) {
+	if a.inputMode != inputNone || a.detailVisible {
 		return
 	}
-
-	if len(services) == 0 {
-		a.showError(fmt.Sprintf("No services found in %s", a.cfg.Schema))
-	} else {
-		a.showError("")
+	a.refreshMu.Lock()
+	if a.loading {
+		a.refreshMu.Unlock()
+		return
 	}
+	a.refreshMu.Unlock()
 
-	a.table.SetServices(services)
-	a.updateFooterStatus()
-	a.header.Refresh()
+	go func() {
+		timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+
+		a.setLoading(true)
+		data, err := a.loadViewData(timeoutCtx)
+		a.setLoading(false)
+
+		a.app.QueueUpdateDraw(func() {
+			if err != nil {
+				a.setError(fmt.Sprintf("Error fetching %s: %v (Ctrl+r to retry)", strings.ToLower(string(a.view)), err))
+			} else if data.warning != "" {
+				a.setError(data.warning)
+			} else {
+				a.setError("")
+			}
+			if err == nil {
+				a.table.SetStatusColumn(data.statusColumn)
+				a.table.SetData(data.headers, data.rows)
+			}
+			a.updateFooterStatus()
+			a.header.Refresh()
+			if a.inputMode == inputNone && !a.detailVisible {
+				a.app.SetFocus(a.table)
+			}
+		})
+	}()
 }
 
 func (a *App) showError(msg string) {
 	a.app.QueueUpdateDraw(func() {
-		a.errorView.SetText(msg)
-		bg := a.styles.Background
-		if msg != "" {
-			if strings.HasPrefix(msg, "No services") {
-				bg = a.styles.RowAltBg
-			} else {
-				bg = tcell.ColorRed
-			}
-		}
-		a.errorView.SetBackgroundColor(bg)
+		a.setError(msg)
 	})
+}
+
+func (a *App) setError(msg string) {
+	a.errorView.SetText(msg)
+	bg := a.styles.Background
+	if msg != "" {
+		if strings.HasPrefix(msg, "No items") || strings.HasPrefix(msg, "No services") {
+			bg = a.styles.RowAltBg
+		} else {
+			bg = tcell.ColorRed
+		}
+	}
+	a.errorView.SetBackgroundColor(bg)
 }
 
 func (a *App) setLoading(loading bool) {
@@ -234,7 +304,7 @@ func (a *App) spin() {
 
 		frame := frames[idx%len(frames)]
 		a.app.QueueUpdateDraw(func() {
-			a.footer.SetHints([]string{fmt.Sprintf("%s Fetching services...", frame)})
+			a.footer.SetHints([]string{fmt.Sprintf("%s Fetching %s...", frame, strings.ToLower(string(a.view)))})
 		})
 		idx++
 		time.Sleep(120 * time.Millisecond)
@@ -251,6 +321,20 @@ func (a *App) bindKeys() {
 }
 
 func (a *App) handleKey(event *tcell.EventKey) bool {
+	if a.detailVisible {
+		if event.Key() == tcell.KeyEsc {
+			a.closeDetail()
+			return true
+		}
+		return true
+	}
+	if a.inputMode != inputNone && a.app.GetFocus() == a.filterField {
+		if event.Key() == tcell.KeyEsc {
+			a.completeInput(tcell.KeyEsc)
+			return true
+		}
+		return false
+	}
 	switch event.Key() {
 	case tcell.KeyCtrlC:
 		a.app.Stop()
@@ -261,7 +345,7 @@ func (a *App) handleKey(event *tcell.EventKey) bool {
 		a.updateFooterStatus()
 		return true
 	case tcell.KeyCtrlR:
-		a.fetchServices(context.Background())
+		a.fetchCurrentView(context.Background())
 		return true
 	case tcell.KeyCtrlD:
 		a.page(1)
@@ -276,7 +360,7 @@ func (a *App) handleKey(event *tcell.EventKey) bool {
 		a.move(-1)
 		return true
 	case tcell.KeyEnter:
-		a.showError("Enter: drill-down not implemented yet")
+		a.openDetail()
 		return true
 	case tcell.KeyRune:
 		switch event.Rune() {
@@ -296,7 +380,32 @@ func (a *App) handleKey(event *tcell.EventKey) bool {
 			a.selectRow(a.table.GetRowCount() - 1)
 			return true
 		case '/':
-			a.activateFilter()
+			a.activateInput(inputFilter, "/ ")
+			return true
+		case ':':
+			a.activateInput(inputCommand, ": ")
+			return true
+		case 's':
+			a.setView(viewServices)
+			return true
+		case 'p':
+			a.setView(viewPools)
+			return true
+		case 'r':
+			a.setView(viewRepos)
+			return true
+		case 'i':
+			if a.view == viewServices {
+				a.openInstancesView()
+			}
+			return true
+		case 'b':
+			if a.view == viewInstances {
+				a.setView(viewServices)
+			}
+			return true
+		case 'n':
+			a.activateInput(inputCommand, ":ns ")
 			return true
 		case '?':
 			a.toggleHelp()
@@ -348,12 +457,26 @@ func (a *App) selectRow(row int) {
 	a.updateFooterStatus()
 }
 
-func (a *App) activateFilter() {
+func (a *App) activateInput(mode inputMode, label string) {
+	a.inputMode = mode
 	a.filterField.SetDisabled(false)
-	a.filterField.SetLabel("> ")
+	a.filterField.SetLabel(label)
+	a.filterField.SetText("")
 	a.app.SetFocus(a.filterField)
+	if a.bottomPages != nil {
+		a.bottomPages.SwitchToPage("input")
+	}
+	if mode == inputCommand {
+		a.footer.SetHints([]string{"enter Run", "esc Cancel"})
+		return
+	}
 	a.footer.SetHints([]string{"esc Clear", "enter Done"})
-	a.filterField.SetDoneFunc(func(key tcell.Key) {
+}
+
+func (a *App) completeInput(key tcell.Key) {
+	text := strings.TrimSpace(a.filterField.GetText())
+	switch a.inputMode {
+	case inputFilter:
 		if key == tcell.KeyEsc {
 			a.filterField.SetText("")
 			a.table.SetFilter("")
@@ -361,11 +484,279 @@ func (a *App) activateFilter() {
 		if key == tcell.KeyEnter || key == tcell.KeyEsc {
 			a.filterField.SetDisabled(true)
 			a.filterField.SetLabel("")
+			a.inputMode = inputNone
 			a.app.SetFocus(a.table)
 			a.footer.SetHints(a.defaultHints)
+			if a.bottomPages != nil {
+				a.bottomPages.SwitchToPage("footer")
+			}
 			a.updateFooterStatus()
 		}
-	})
+	case inputCommand:
+		if key == tcell.KeyEnter {
+			a.runCommand(text)
+		}
+		if key == tcell.KeyEnter || key == tcell.KeyEsc {
+			a.filterField.SetText("")
+			a.filterField.SetDisabled(true)
+			a.filterField.SetLabel("")
+			a.inputMode = inputNone
+			a.app.SetFocus(a.table)
+			a.footer.SetHints(a.defaultHints)
+			if a.bottomPages != nil {
+				a.bottomPages.SwitchToPage("footer")
+			}
+			a.updateFooterStatus()
+		}
+	default:
+	}
+}
+
+func (a *App) runCommand(cmd string) {
+	if cmd == "" {
+		return
+	}
+	fields := strings.Fields(cmd)
+	if len(fields) == 0 {
+		return
+	}
+	switch strings.ToLower(fields[0]) {
+	case "svc", "service", "services":
+		a.setView(viewServices)
+	case "pool", "pools", "cp":
+		a.setView(viewPools)
+	case "repo", "repos", "image", "images":
+		a.setView(viewRepos)
+	case "inst", "instances":
+		a.openInstancesView()
+	case "ns", "namespace", "schema":
+		if len(fields) < 2 {
+			a.showError("Usage: :ns <schema>")
+			return
+		}
+		a.setSchema(fields[1])
+	case "help", "?":
+		a.toggleHelp()
+	default:
+		a.showError(fmt.Sprintf("Unknown command: %s", fields[0]))
+	}
+}
+
+func (a *App) setView(view viewKind) {
+	if view == viewInstances && a.activeService == "" {
+		a.showError("Select a service first to view instances")
+		return
+	}
+	a.view = view
+	a.header.SetView(string(view))
+	title := fmt.Sprintf(" %s ", view)
+	if view == viewInstances && a.activeService != "" {
+		title = fmt.Sprintf(" %s (%s) ", view, a.activeService)
+	}
+	a.table.SetTitle(title).SetTitleAlign(tview.AlignLeft)
+	a.table.SetFilter("")
+	a.filterField.SetText("")
+	go a.fetchCurrentView(context.Background())
+}
+
+func (a *App) setSchema(schema string) {
+	if strings.TrimSpace(schema) == "" {
+		return
+	}
+	a.cfg.Schema = schema
+	a.spcs.SetSchema(schema)
+	a.header.Refresh()
+	a.fetchCurrentView(context.Background())
+}
+
+func (a *App) openInstancesView() {
+	if a.view != viewServices {
+		a.showError("Instances view requires Services selection")
+		return
+	}
+	row, ok := a.table.SelectedRow()
+	if !ok || len(row.Cells) < 2 {
+		a.showError("Select a service first to view instances")
+		return
+	}
+	a.activeService = row.Cells[1]
+	a.setView(viewInstances)
+}
+
+func (a *App) openDetail() {
+	row, ok := a.table.SelectedRow()
+	if !ok {
+		return
+	}
+	content := a.buildDetail(row)
+	a.detailView.SetText(content)
+	a.detailVisible = true
+	a.pages.ShowPage("detail")
+	a.app.SetFocus(a.detailView)
+}
+
+func (a *App) closeDetail() {
+	a.detailVisible = false
+	a.pages.HidePage("detail")
+	a.app.SetFocus(a.table)
+}
+
+func (a *App) buildDetail(row TableRow) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	switch a.view {
+	case viewServices:
+		name := ""
+		if len(row.Cells) > 1 {
+			name = row.Cells[1]
+		}
+		if name == "" {
+			return "No service selected."
+		}
+		descr, err := a.spcs.DescribeService(ctx, name)
+		if err != nil {
+			return fmt.Sprintf("Describe service failed: %v", err)
+		}
+		instances, instErr := a.spcs.ListServiceInstances(ctx, name)
+		var b strings.Builder
+		b.WriteString(fmt.Sprintf("Service: %s\n\n", name))
+		b.WriteString(formatKeyValues(descr))
+		b.WriteString("\n\nInstances:\n")
+		if instErr != nil {
+			b.WriteString(fmt.Sprintf("  Error: %v\n", instErr))
+			return b.String()
+		}
+		if len(instances) == 0 {
+			b.WriteString("  (none)\n")
+			return b.String()
+		}
+		for _, inst := range instances {
+			b.WriteString(fmt.Sprintf("  %s  %s  %s  %s\n", inst.Name, strings.ToUpper(inst.Status), inst.Node, inst.Age))
+		}
+		return b.String()
+	case viewPools:
+		return formatKeyValues(mapFromRow(row, a.table.Headers()))
+	case viewRepos:
+		return formatKeyValues(mapFromRow(row, a.table.Headers()))
+	case viewInstances:
+		return formatKeyValues(mapFromRow(row, a.table.Headers()))
+	default:
+		return "No details available."
+	}
+}
+
+func (a *App) loadViewData(ctx context.Context) (viewData, error) {
+	switch a.view {
+	case viewServices:
+		services, err := a.spcs.ListServices(ctx)
+		if err != nil {
+			return viewData{}, err
+		}
+		headers := []string{"NAMESPACE", "NAME", "STATUS", "POOL", "AGE"}
+		rows := make([]TableRow, 0, len(services))
+		for _, s := range services {
+			age := s.Age
+			if age == "" && !s.CreatedAt.IsZero() {
+				age = models.HumanizeAge(s.CreatedAt)
+			}
+			rows = append(rows, TableRow{Cells: []string{s.Namespace, s.Name, strings.ToUpper(s.Status), s.ComputePool, age}})
+		}
+		if len(rows) == 0 {
+			return viewData{headers: headers, rows: rows, statusColumn: 2, warning: fmt.Sprintf("No items found in %s", a.cfg.Schema)}, nil
+		}
+		return viewData{headers: headers, rows: rows, statusColumn: 2}, nil
+	case viewPools:
+		pools, err := a.spcs.ListComputePools(ctx)
+		if err != nil {
+			return viewData{}, err
+		}
+		headers := []string{"NAME", "STATE", "MIN", "MAX", "FAMILY", "AGE"}
+		rows := make([]TableRow, 0, len(pools))
+		for _, p := range pools {
+			age := p.Age
+			if age == "" && !p.CreatedAt.IsZero() {
+				age = models.HumanizeAge(p.CreatedAt)
+			}
+			rows = append(rows, TableRow{Cells: []string{p.Name, strings.ToUpper(p.State), p.MinNodes, p.MaxNodes, p.InstanceFamily, age}})
+		}
+		if len(rows) == 0 {
+			return viewData{headers: headers, rows: rows, statusColumn: 1, warning: "No items found in compute pools"}, nil
+		}
+		return viewData{headers: headers, rows: rows, statusColumn: 1}, nil
+	case viewRepos:
+		repos, err := a.spcs.ListImageRepositories(ctx)
+		if err != nil {
+			return viewData{}, err
+		}
+		headers := []string{"NAME", "REPO_URL", "OWNER", "AGE"}
+		rows := make([]TableRow, 0, len(repos))
+		for _, r := range repos {
+			age := r.Age
+			if age == "" && !r.CreatedAt.IsZero() {
+				age = models.HumanizeAge(r.CreatedAt)
+			}
+			rows = append(rows, TableRow{Cells: []string{r.Name, r.RepositoryURL, r.Owner, age}})
+		}
+		if len(rows) == 0 {
+			return viewData{headers: headers, rows: rows, statusColumn: -1, warning: fmt.Sprintf("No items found in %s.%s", a.cfg.Database, a.cfg.Schema)}, nil
+		}
+		return viewData{headers: headers, rows: rows, statusColumn: -1}, nil
+	case viewInstances:
+		if a.activeService == "" {
+			headers := []string{"INSTANCE", "STATUS", "NODE", "AGE"}
+			return viewData{headers: headers, rows: nil, statusColumn: -1, warning: "Select a service to view instances"}, nil
+		}
+		instances, err := a.spcs.ListServiceInstances(ctx, a.activeService)
+		if err != nil {
+			return viewData{}, err
+		}
+		headers := []string{"INSTANCE", "STATUS", "NODE", "AGE"}
+		rows := make([]TableRow, 0, len(instances))
+		for _, inst := range instances {
+			age := inst.Age
+			if age == "" && !inst.CreatedAt.IsZero() {
+				age = models.HumanizeAge(inst.CreatedAt)
+			}
+			rows = append(rows, TableRow{Cells: []string{inst.Name, strings.ToUpper(inst.Status), inst.Node, age}})
+		}
+		if len(rows) == 0 {
+			return viewData{headers: headers, rows: rows, statusColumn: 1, warning: fmt.Sprintf("No instances found for %s", a.activeService)}, nil
+		}
+		return viewData{headers: headers, rows: rows, statusColumn: 1}, nil
+	default:
+		return viewData{}, nil
+	}
+}
+
+func mapFromRow(row TableRow, headers []string) map[string]string {
+	out := make(map[string]string, len(headers))
+	for i, h := range headers {
+		if i < len(row.Cells) {
+			out[h] = row.Cells[i]
+		}
+	}
+	return out
+}
+
+func formatKeyValues(values map[string]string) string {
+	if len(values) == 0 {
+		return "(no details)"
+	}
+	keys := make([]string, 0, len(values))
+	for k := range values {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		v := values[k]
+		if strings.TrimSpace(v) == "" {
+			continue
+		}
+		b.WriteString(fmt.Sprintf("%s: %s\n", k, v))
+	}
+	return b.String()
 }
 
 func (a *App) toggleHelp() {
@@ -375,14 +766,14 @@ func (a *App) toggleHelp() {
 		return
 	}
 	a.helpVisible = true
-	help := "j/k/↓/↑ move  g/G top/bottom  / filter  esc clear  ctrl+r refresh  q quit"
+	help := "j/k/↓/↑ move  g/G top/bottom  / filter  : cmd  s/p/r views  i instances  b back  enter details  esc clear  ctrl+r refresh  q quit"
 	a.showError(help)
 }
 
 func (a *App) updateFooterStatus() {
 	filterText := a.filterField.GetText()
 	parts := []string{a.table.SelectionInfo()}
-	if strings.TrimSpace(filterText) != "" {
+	if a.inputMode == inputFilter && strings.TrimSpace(filterText) != "" {
 		parts = append(parts, fmt.Sprintf("filter: %s", filterText))
 	}
 	a.footer.SetStatus(strings.Join(parts, "  "))
@@ -398,22 +789,61 @@ func (a *App) DebugWriter() io.Writer {
 
 // PrintTable renders a k9s-like table to stdout for the CLI list command.
 func PrintTable(services []models.Service) {
-	fmt.Println("┌──────────────────────────────────────────────┐")
-	fmt.Printf("│ %-12s %-16s %-10s %-12s %-6s │\n", "NAMESPACE", "NAME", "STATUS", "POOL", "AGE")
-	fmt.Println("├──────────────────────────────────────────────┤")
+	headers := []string{"NAMESPACE", "NAME", "STATUS", "POOL", "AGE"}
+	rows := make([][]string, 0, len(services))
 	for _, s := range services {
 		status := strings.ToUpper(s.Status)
 		age := s.Age
 		if age == "" && !s.CreatedAt.IsZero() {
 			age = models.HumanizeAge(s.CreatedAt)
 		}
-		fmt.Printf("│ %-12s %-16s %-10s %-12s %-6s │\n", s.Namespace, s.Name, status, s.ComputePool, age)
+		rows = append(rows, []string{s.Namespace, s.Name, status, s.ComputePool, age})
 	}
-	fmt.Println("└──────────────────────────────────────────────┘")
+
+	widths := make([]int, len(headers))
+	for i, h := range headers {
+		widths[i] = len(h)
+	}
+	for _, row := range rows {
+		for i, v := range row {
+			if l := len(v); l > widths[i] {
+				widths[i] = l
+			}
+		}
+	}
+
+	drawLine := func(left, mid, right string) {
+		fmt.Print(left)
+		for i, w := range widths {
+			fmt.Print(strings.Repeat("─", w+2))
+			if i < len(widths)-1 {
+				fmt.Print(mid)
+			}
+		}
+		fmt.Println(right)
+	}
+
+	drawLine("┌", "┬", "┐")
+	fmt.Print("│")
+	for i, h := range headers {
+		fmt.Printf(" %-*s ", widths[i], h)
+		fmt.Print("│")
+	}
+	fmt.Println()
+	drawLine("├", "┼", "┤")
+	for _, row := range rows {
+		fmt.Print("│")
+		for i, v := range row {
+			fmt.Printf(" %-*s ", widths[i], v)
+			fmt.Print("│")
+		}
+		fmt.Println()
+	}
+	drawLine("└", "┴", "┘")
 }
 
 func defaultKeyHints() []string {
-	return []string{"j/k/↓/↑ Move", "g/G Top/Bottom", "ctrl+d/ctrl+u Page", "/ Filter", "ctrl+r Refresh", "q Quit"}
+	return []string{"j/k/↓/↑ Move", "g/G Top/Bottom", "ctrl+d/ctrl+u Page", "s/p/r Views", "i Instances", "b Back", "enter Details", "/ Filter", ": Cmd", "ctrl+r Refresh", "q Quit"}
 }
 
 type textViewWriter struct {

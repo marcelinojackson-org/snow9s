@@ -16,6 +16,35 @@ type Service struct {
 	Age         string    `json:"age"`
 }
 
+// ComputePool represents a Snowpark compute pool record.
+type ComputePool struct {
+	Name           string    `json:"name"`
+	State          string    `json:"state"`
+	MinNodes       string    `json:"minNodes"`
+	MaxNodes       string    `json:"maxNodes"`
+	InstanceFamily string    `json:"instanceFamily"`
+	CreatedAt      time.Time `json:"createdAt"`
+	Age            string    `json:"age"`
+}
+
+// ImageRepository represents an SPCS image repository.
+type ImageRepository struct {
+	Name          string    `json:"name"`
+	RepositoryURL string    `json:"repositoryUrl"`
+	Owner         string    `json:"owner"`
+	CreatedAt     time.Time `json:"createdAt"`
+	Age           string    `json:"age"`
+}
+
+// ServiceInstance represents an SPCS service instance.
+type ServiceInstance struct {
+	Name      string    `json:"name"`
+	Status    string    `json:"status"`
+	Node      string    `json:"node"`
+	CreatedAt time.Time `json:"createdAt"`
+	Age       string    `json:"age"`
+}
+
 const (
 	StatusRunning   = "running"
 	StatusStarting  = "starting"
