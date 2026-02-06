@@ -35,4 +35,4 @@ Thanks for your interest in contributing.
 
 ## License
 
-By contributing, you agree that your contributions are made under the same license as this repository.
+By contributing, you agree that your contributions are licensed under the Apache License 2.0 for this repository.

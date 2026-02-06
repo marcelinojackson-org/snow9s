@@ -14,9 +14,9 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
-	"github.com/yourusername/snow9s/internal/config"
-	"github.com/yourusername/snow9s/internal/snowflake"
-	"github.com/yourusername/snow9s/pkg/models"
+	"github.com/marcelinojackson-org/snow9s/internal/config"
+	"github.com/marcelinojackson-org/snow9s/internal/snowflake"
+	"github.com/marcelinojackson-org/snow9s/pkg/models"
 )
 
 const appVersion = "0.1.0"

@@ -6,7 +6,7 @@ snow9s is a k9s-style terminal dashboard for Snowflake Snowpark Container Servic
 
 - Go install (requires Go 1.22+):
   ```bash
-  go install github.com/yourusername/snow9s/cmd/snow9s@latest
+  go install github.com/marcelinojackson-org/snow9s/cmd/snow9s@latest
   ```
 - From source:
   ```bash

@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/rivo/tview"
-	"github.com/yourusername/snow9s/internal/config"
+	"github.com/marcelinojackson-org/snow9s/internal/config"
 )
 
 // Header renders the cyan banner with context details.

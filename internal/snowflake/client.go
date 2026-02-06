@@ -14,7 +14,7 @@ import (
 
 	"github.com/snowflakedb/gosnowflake"
 	_ "github.com/snowflakedb/gosnowflake"
-	"github.com/yourusername/snow9s/internal/config"
+	"github.com/marcelinojackson-org/snow9s/internal/config"
 )
 
 const defaultTimeout = 10 * time.Second

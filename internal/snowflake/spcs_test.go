@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/yourusername/snow9s/internal/config"
+	"github.com/marcelinojackson-org/snow9s/internal/config"
 )
 
 func TestListServices(t *testing.T) {

@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/yourusername/snow9s/internal/config"
-	"github.com/yourusername/snow9s/internal/snowflake"
-	"github.com/yourusername/snow9s/internal/ui"
+	"github.com/marcelinojackson-org/snow9s/internal/config"
+	"github.com/marcelinojackson-org/snow9s/internal/snowflake"
+	"github.com/marcelinojackson-org/snow9s/internal/ui"
 )
 
 var cfgOverrides config.Config

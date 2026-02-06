@@ -1,4 +1,4 @@
-module github.com/yourusername/snow9s
+module github.com/marcelinojackson-org/snow9s
 
 go 1.24.0
 

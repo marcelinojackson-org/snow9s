@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourusername/snow9s/internal/config"
-	"github.com/yourusername/snow9s/pkg/models"
+	"github.com/marcelinojackson-org/snow9s/internal/config"
+	"github.com/marcelinojackson-org/snow9s/pkg/models"
 )
 
 // SPCS provides Snowpark Container Services helpers.
